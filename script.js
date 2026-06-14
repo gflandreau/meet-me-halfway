@@ -153,12 +153,12 @@ function initMap(a, b, mid) {
       iconAnchor: [15, 28],
     });
 
-  L.marker([a.lat, a.lon], { icon: pin("#ff7eb3", "📍") }).addTo(markerLayer).bindPopup("You 💗");
-  L.marker([b.lat, b.lon], { icon: pin("#5b8def", "💌") }).addTo(markerLayer).bindPopup("Them 💙");
-  L.marker([mid.lat, mid.lon], { icon: pin("#a18cd1", "✨") }).addTo(markerLayer).bindPopup("Your middle ✨");
+  L.marker([a.lat, a.lon], { icon: pin("#ff4d9d", "📍") }).addTo(markerLayer).bindPopup("You 💗");
+  L.marker([b.lat, b.lon], { icon: pin("#3a6ff0", "📍") }).addTo(markerLayer).bindPopup("Them 💙");
+  L.marker([mid.lat, mid.lon], { icon: pin("#9b5de5", "✨") }).addTo(markerLayer).bindPopup("Your middle ✨");
 
   L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-    color: "#a18cd1", weight: 3, dashArray: "6 8", opacity: 0.7,
+    color: "#9b5de5", weight: 3, dashArray: "6 8", opacity: 0.7,
   }).addTo(markerLayer);
 
   map.fitBounds(
