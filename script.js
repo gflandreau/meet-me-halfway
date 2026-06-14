@@ -6,11 +6,13 @@ const goBtn = document.getElementById("go-btn");
 const resultsWrap = document.getElementById("results-wrap");
 const cardsEl = document.getElementById("cards");
 const filtersEl = document.getElementById("filters");
+const waterNoteEl = document.getElementById("water-note");
 
 let map;
 let markerLayer;
 let allPlaces = [];
 let activeFilter = "all";
+let state = { a: null, b: null, radius: 2000 };
 
 /* ---------- helpers ---------- */
 
@@ -65,6 +67,19 @@ async function geocode(query) {
   };
 }
 
+// Point-in-polygon water test via Overpass is_in. Catches bays, lakes, and
+// wide rivers that are mapped as filled areas. (Reverse-geocoding can't be
+// trusted here — county/city boundaries often extend out over the water.)
+async function isWaterPoint(pt) {
+  const q = `[out:json][timeout:25];is_in(${pt.lat},${pt.lon})->.a;(area.a["natural"="water"];area.a["natural"="bay"];area.a["natural"="strait"];area.a["water"];);out tags;`;
+  try {
+    const data = await overpass(q);
+    return (data.elements || []).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /* ---------- places (Overpass) ---------- */
 
 // Pick a search radius (meters) based on how far apart the two people are.
@@ -75,7 +90,6 @@ function radiusFor(distApartKm) {
 }
 
 const CATEGORY = {
-  // amenity / leisure / tourism value -> our bucket
   restaurant: "eat", fast_food: "eat", bar: "eat", pub: "eat",
   ice_cream: "eat", food_court: "eat", biergarten: "eat",
   cafe: "cafe",
@@ -90,6 +104,27 @@ const LABELS = {
   date: { badge: "badge--date", text: "Hangout", emoji: "🎡" },
 };
 
+// Public Overpass instances rate-limit / time out sometimes; fall back to a
+// mirror before giving up.
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+
+async function overpass(query) {
+  let lastErr;
+  for (const url of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(query) });
+      if (res.ok) return await res.json();
+      lastErr = new Error("HTTP " + res.status);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("Overpass failed");
+}
+
 async function fetchPlaces(mid, radius) {
   const q = `[out:json][timeout:25];
 (
@@ -99,12 +134,12 @@ async function fetchPlaces(mid, radius) {
 );
 out body 120;`;
 
-  const res = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    body: "data=" + encodeURIComponent(q),
-  });
-  if (!res.ok) throw new Error("Places lookup failed");
-  const data = await res.json();
+  let data;
+  try {
+    data = await overpass(q);
+  } catch {
+    throw new Error("Couldn't load places right now — please try again in a moment 💔");
+  }
 
   const seen = new Set();
   const places = [];
@@ -132,39 +167,87 @@ out body 120;`;
   return places;
 }
 
+// Prefer real towns/cities over tiny marinas, islands, and neighbourhoods when
+// suggesting land alternatives. Lower rank = more substantial place.
+const PLACE_RANK = {
+  city: 0, town: 1, village: 2, suburb: 3, neighbourhood: 4, hamlet: 4, locality: 5,
+};
+
+// Find nearby populated places to offer as land alternatives when the
+// midpoint lands on water. Ranked by a blend of distance and place size so the
+// closest *meetable* town floats to the top.
+async function nearestLandOptions(mid, radius) {
+  const q = `[out:json][timeout:25];
+(
+  node["place"~"^(city|town|village|suburb|neighbourhood|hamlet|locality)$"](around:${radius},${mid.lat},${mid.lon});
+);
+out body 80;`;
+
+  let data;
+  try {
+    data = await overpass(q);
+  } catch {
+    return [];
+  }
+
+  const seen = new Set();
+  const opts = [];
+  for (const el of data.elements || []) {
+    const tags = el.tags || {};
+    const name = tags.name;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const rank = PLACE_RANK[tags.place] ?? 5;
+    const distKm = distanceKm(mid, { lat: el.lat, lon: el.lon });
+    opts.push({ name, lat: el.lat, lon: el.lon, distKm, score: distKm + rank * 3 });
+  }
+  // Cities/towns first (the +rank*3 penalty), but still favouring closer ones.
+  opts.sort((a, b) => a.score - b.score);
+  return opts.slice(0, 5);
+}
+
 /* ---------- map ---------- */
 
-function initMap(a, b, mid) {
-  if (!map) {
-    map = L.map("map", { scrollWheelZoom: false });
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "© OpenStreetMap contributors",
-      maxZoom: 19,
-    }).addTo(map);
-    markerLayer = L.layerGroup().addTo(map);
-  }
+function pinIcon(color, emoji) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="background:${color};width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 3px 8px rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;border:2px solid #fff"><span style="transform:rotate(45deg);font-size:14px">${emoji}</span></div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 28],
+  });
+}
+
+function initMap() {
+  if (map) return;
+  map = L.map("map", { scrollWheelZoom: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap contributors",
+    maxZoom: 19,
+  }).addTo(map);
+  markerLayer = L.layerGroup().addTo(map);
+}
+
+// Draw the "you / them / middle" pins and connecting line around a center.
+function drawBase(center) {
   markerLayer.clearLayers();
+  const a = state.a, b = state.b;
 
-  const pin = (color, emoji) =>
-    L.divIcon({
-      className: "",
-      html: `<div style="background:${color};width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 3px 8px rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;border:2px solid #fff"><span style="transform:rotate(45deg);font-size:14px">${emoji}</span></div>`,
-      iconSize: [30, 30],
-      iconAnchor: [15, 28],
-    });
-
-  L.marker([a.lat, a.lon], { icon: pin("#ff4d9d", "📍") }).addTo(markerLayer).bindPopup("You 💗");
-  L.marker([b.lat, b.lon], { icon: pin("#3a6ff0", "📍") }).addTo(markerLayer).bindPopup("Them 💙");
-  L.marker([mid.lat, mid.lon], { icon: pin("#9b5de5", "✨") }).addTo(markerLayer).bindPopup("Your middle ✨");
+  L.marker([a.lat, a.lon], { icon: pinIcon("#ff4d9d", "📍") })
+    .addTo(markerLayer).bindPopup("You 💗");
+  L.marker([b.lat, b.lon], { icon: pinIcon("#3a6ff0", "📍") })
+    .addTo(markerLayer).bindPopup("Them 💙");
+  L.marker([center.lat, center.lon], { icon: pinIcon("#9b5de5", "✨") })
+    .addTo(markerLayer)
+    .bindPopup(center.name ? `Meet near ${center.name} ✨` : "Your middle ✨");
 
   L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
     color: "#9b5de5", weight: 3, dashArray: "6 8", opacity: 0.7,
   }).addTo(markerLayer);
 
   map.fitBounds(
-    L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon]]).pad(0.3)
+    L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon], [center.lat, center.lon]]).pad(0.3)
   );
-  setTimeout(() => map.invalidateSize(), 200);
+  setTimeout(() => map.invalidateSize(), 150);
 }
 
 function addPlaceMarkers(places) {
@@ -182,6 +265,31 @@ function addPlaceMarkers(places) {
   });
 }
 
+/* ---------- water options UI ---------- */
+
+function showWaterNote(options, activeName, heading) {
+  if (!options.length) { waterNoteEl.hidden = true; return; }
+  waterNoteEl.hidden = false;
+  waterNoteEl.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = heading;
+  waterNoteEl.appendChild(p);
+  const wrap = document.createElement("div");
+  wrap.className = "water-options";
+  options.forEach((o) => {
+    const btn = document.createElement("button");
+    btn.className = "land-btn" + (o.name === activeName ? " land-btn--active" : "");
+    btn.textContent = `${o.name} · ${o.distKm.toFixed(1)} km`;
+    btn.addEventListener("click", () => {
+      [...wrap.children].forEach((c) => c.classList.toggle("land-btn--active", c === btn));
+      setStatus(`Searching near ${o.name}… 💫`);
+      loadAndRender(o);
+    });
+    wrap.appendChild(btn);
+  });
+  waterNoteEl.appendChild(wrap);
+}
+
 /* ---------- rendering ---------- */
 
 function render() {
@@ -192,7 +300,7 @@ function render() {
 
   cardsEl.innerHTML = "";
   if (!list.length) {
-    cardsEl.innerHTML = `<p class="empty">No spots in this category near your middle — try a wider category! 🌷</p>`;
+    cardsEl.innerHTML = `<p class="empty">No spots in this category nearby — try a wider category! 🌷</p>`;
     return;
   }
 
@@ -201,7 +309,6 @@ function render() {
     const details = [p.cuisine || p.kind, `${p.distKm.toFixed(1)} km from the middle`]
       .filter(Boolean)
       .join(" · ");
-    const gmaps = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(p.name)}&query_place_id=`;
     const mapHref = `https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lon}#map=18/${p.lat}/${p.lon}`;
 
     const card = document.createElement("article");
@@ -224,7 +331,71 @@ filtersEl.addEventListener("click", (e) => {
   render();
 });
 
+/* ---------- animated rainbow title ---------- */
+
+const HEART_SVG =
+  '<svg class="heart-svg" viewBox="0 0 32 29.6" aria-hidden="true"><path d="M23.6,0c-3.4,0-6.3,2.7-7.6,5.6C14.7,2.7,11.8,0,8.4,0C3.8,0,0,3.8,0,8.4c0,9.4,9.5,11.9,16,21.2c6.1-9.3,16-12,16-21.2C32,3.8,28.2,0,23.6,0z"/></svg>';
+
+// Ordered rainbow, cycled across the letters.
+const RAINBOW = [
+  "#ff4d4d", "#ff7a1a", "#eaa400", "#36c46b", "#1aa7c0",
+  "#3a6ff0", "#6b4ee6", "#a23ce0", "#ff4d9d",
+];
+
+// Build "meet me halfway" with ordered rainbow colors and an arched (curved) layout.
+function buildTitle() {
+  const el = document.getElementById("hero-title");
+  if (!el) return;
+  const chars = [..."meet me halfway"];
+  const n = chars.length;
+  el.textContent = "";
+
+  let ci = 0;
+  chars.forEach((ch, i) => {
+    if (ch === " ") {
+      el.appendChild(document.createTextNode(" "));
+      return;
+    }
+    const span = document.createElement("span");
+    span.className = "ltr";
+    span.textContent = ch;
+    span.style.color = RAINBOW[ci % RAINBOW.length];
+    ci++;
+
+    const t = n > 1 ? (i / (n - 1)) * 2 - 1 : 0; // -1 (left) .. 1 (right)
+    const lift = -(1 - t * t) * 18;              // hill: letters rise in the middle
+    const angle = t * 18;                        // tilt to follow the curve
+    span.style.transform = `translateY(${lift}px) rotate(${angle}deg)`;
+    el.appendChild(span);
+  });
+
+  const heart = document.createElement("span");
+  heart.className = "heart";
+  heart.setAttribute("aria-hidden", "true");
+  heart.innerHTML = HEART_SVG;
+  el.appendChild(heart);
+}
+
+buildTitle();
+
 /* ---------- main flow ---------- */
+
+// Fetch + render everything around a chosen center.
+async function loadAndRender(center) {
+  drawBase(center);
+  allPlaces = await fetchPlaces(center, state.radius);
+  addPlaceMarkers(allPlaces.slice(0, 60));
+  activeFilter = "all";
+  [...filtersEl.children].forEach((c, i) => c.classList.toggle("chip--active", i === 0));
+  render();
+
+  const where = center.name ? `near ${center.name}` : "near your middle";
+  if (allPlaces.length) {
+    setStatus(`Found ${allPlaces.length} cute spots ${where} 💕`);
+  } else {
+    setStatus("Hmm, no spots found here — try another option or two closer locations 🌼", true);
+  }
+}
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -234,29 +405,46 @@ form.addEventListener("submit", async (e) => {
 
   goBtn.disabled = true;
   resultsWrap.hidden = true;
+  waterNoteEl.hidden = true;
   setStatus("Finding both of you on the map… 🗺️");
 
   try {
     const [a, b] = await Promise.all([geocode(q1), geocode(q2)]);
-    const mid = geoMidpoint(a, b);
+    const trueMid = geoMidpoint(a, b);
     const apart = distanceKm(a, b);
-    const radius = radiusFor(apart);
+    state = { a, b, radius: radiusFor(apart) };
 
     setStatus(`You're ${apart.toFixed(1)} km apart. Searching the sweet spot in between… 💫`);
-
     resultsWrap.hidden = false;
-    initMap(a, b, mid);
+    initMap();
 
-    allPlaces = await fetchPlaces(mid, radius);
-    addPlaceMarkers(allPlaces.slice(0, 60));
-    activeFilter = "all";
-    [...filtersEl.children].forEach((c, i) => c.classList.toggle("chip--active", i === 0));
-    render();
+    const landRadius = Math.max(state.radius * 4, 15000);
 
-    if (allPlaces.length) {
-      setStatus(`Found ${allPlaces.length} cute spots near ${a.label.split(",")[0]} & ${b.label.split(",")[0]}'s middle 💕`);
-    } else {
-      setStatus("Hmm, no spots found right in the middle — try two closer locations! 🌼", true);
+    // 1) Midpoint sits inside a mapped water body (bay / lake / wide river).
+    if (await isWaterPoint(trueMid)) {
+      setStatus("Your middle landed on water 🌊 Finding the closest land…");
+      const options = await nearestLandOptions(trueMid, landRadius);
+      if (options.length) {
+        showWaterNote(options, options[0].name,
+          "🌊 your exact middle landed on water! here are the closest spots on land — pick one:");
+        await loadAndRender(options[0]);
+        return;
+      }
+    }
+
+    // 2) Otherwise search right at the midpoint.
+    waterNoteEl.hidden = true;
+    await loadAndRender(trueMid);
+
+    // 3) Fallback: nothing at the midpoint (open ocean or an empty area) —
+    //    offer the nearest towns so there's always somewhere to meet.
+    if (!allPlaces.length) {
+      const options = await nearestLandOptions(trueMid, landRadius);
+      if (options.length) {
+        showWaterNote(options, options[0].name,
+          "🌊 nothing right at your exact middle (water, or a quiet spot)! here are the closest towns — pick one:");
+        await loadAndRender(options[0]);
+      }
     }
   } catch (err) {
     console.error(err);

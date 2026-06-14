@@ -12,8 +12,8 @@
 </head>
 <body>
   <header class="hero">
-    <h1 class="hero__title">Meet Me <span>Halfway</span> <span class="heart">💕</span></h1>
-    <p class="hero__subtitle">Two people, one perfect middle. Drop in your spots and we'll find the cutest places to meet in between.</p>
+    <h1 class="hero__title" id="hero-title" aria-label="meet me halfway"></h1>
+    <p class="hero__subtitle">two people, one perfect middle. drop in your spots and we'll find the cutest places to meet in between.</p>
   </header>
 
   <main class="container">
@@ -36,6 +36,7 @@
     <p id="status" class="status" role="status" aria-live="polite"></p>
 
     <div id="results-wrap" class="results-wrap" hidden>
+      <div id="water-note" class="water-note" hidden></div>
       <div id="map" class="map"></div>
 
       <div class="filters" id="filters">
@@ -50,7 +51,7 @@
   </main>
 
   <footer class="footer">
-    Made with <span class="heart">💕</span> · Powered by OpenStreetMap
+    Made with <span class="heart"><svg class="heart-svg" viewBox="0 0 32 29.6" aria-hidden="true"><path d="M23.6,0c-3.4,0-6.3,2.7-7.6,5.6C14.7,2.7,11.8,0,8.4,0C3.8,0,0,3.8,0,8.4c0,9.4,9.5,11.9,16,21.2c6.1-9.3,16-12,16-21.2C32,3.8,28.2,0,23.6,0z"/></svg></span> · Powered by OpenStreetMap
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
