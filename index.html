@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meet Me Halfway 💕</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="blob blob--1"></div>
+  <div class="blob blob--2"></div>
+  <div class="blob blob--3"></div>
+  <div class="blob blob--4"></div>
+  <div class="blob blob--5"></div>
+
+  <header class="hero">
+    <h1 class="hero__title">Meet Me <span>Halfway</span> <span class="heart">💕</span></h1>
+    <p class="hero__subtitle">Two people, one perfect middle. Drop in your spots and we'll find the cutest places to meet in between.</p>
+  </header>
+
+  <main class="container">
+    <form id="search-form" class="search-card">
+      <div class="field">
+        <label for="loc1">📍 Your spot</label>
+        <input id="loc1" type="text" placeholder="e.g. Brooklyn, NY or 11211" autocomplete="off" required />
+      </div>
+
+      <div class="field-divider"><span>&amp;</span></div>
+
+      <div class="field">
+        <label for="loc2">💌 Their spot</label>
+        <input id="loc2" type="text" placeholder="e.g. Hoboken, NJ or 07030" autocomplete="off" required />
+      </div>
+
+      <button type="submit" class="go-btn" id="go-btn">Find our middle ✨</button>
+    </form>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+
+    <div id="results-wrap" class="results-wrap" hidden>
+      <div id="map" class="map"></div>
+
+      <div class="filters" id="filters">
+        <button class="chip chip--active" data-filter="all">Everything 🌈</button>
+        <button class="chip" data-filter="eat">Food &amp; Drinks 🍜</button>
+        <button class="chip" data-filter="cafe">Cafés ☕</button>
+        <button class="chip" data-filter="date">Hangouts 🎡</button>
+      </div>
+
+      <div id="cards" class="cards"></div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    Made with <span class="heart">💕</span> · Powered by OpenStreetMap
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
