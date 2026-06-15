@@ -7,12 +7,21 @@ const resultsWrap = document.getElementById("results-wrap");
 const cardsEl = document.getElementById("cards");
 const filtersEl = document.getElementById("filters");
 const waterNoteEl = document.getElementById("water-note");
+const modeToggle = document.getElementById("mode-toggle");
 
 let map;
 let markerLayer;
 let allPlaces = [];
 let activeFilter = "all";
+let midMode = "drive"; // "drive" = halfway along the driving route, "geo" = straight-line
 let state = { a: null, b: null, radius: 2000 };
+
+modeToggle.addEventListener("click", (e) => {
+  const btn = e.target.closest(".mode-btn");
+  if (!btn) return;
+  midMode = btn.dataset.mode;
+  [...modeToggle.children].forEach((c) => c.classList.toggle("mode-btn--active", c === btn));
+});
 
 /* ---------- helpers ---------- */
 
@@ -50,6 +59,11 @@ function distanceKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+// Format a kilometre distance as miles for display.
+function mi(km) {
+  return (km * 0.621371).toFixed(1);
+}
+
 /* ---------- geocoding (Nominatim) ---------- */
 
 async function geocode(query) {
@@ -80,14 +94,56 @@ async function isWaterPoint(pt) {
   }
 }
 
+/* ---------- driving route (OSRM) ---------- */
+
+// Find the point that is halfway *by driving distance* along the road route
+// between a and b. Returns { center, latlngs } or null if no route exists.
+async function drivingMidpoint(a, b) {
+  const url =
+    `https://router.project-osrm.org/route/v1/driving/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.code !== "Ok" || !data.routes || !data.routes.length) return null;
+
+    const coords = data.routes[0].geometry.coordinates; // [lon, lat] pairs
+    if (coords.length < 2) return null;
+
+    // Cumulative distance along the route.
+    let total = 0;
+    const cum = [0];
+    for (let i = 1; i < coords.length; i++) {
+      total += distanceKm(
+        { lat: coords[i - 1][1], lon: coords[i - 1][0] },
+        { lat: coords[i][1], lon: coords[i][0] }
+      );
+      cum.push(total);
+    }
+
+    // Walk to the halfway distance and interpolate within that segment.
+    const half = total / 2;
+    let k = 1;
+    while (k < cum.length && cum[k] < half) k++;
+    const span = cum[k] - cum[k - 1] || 1;
+    const f = (half - cum[k - 1]) / span;
+    const lon = coords[k - 1][0] + (coords[k][0] - coords[k - 1][0]) * f;
+    const lat = coords[k - 1][1] + (coords[k][1] - coords[k - 1][1]) * f;
+
+    return {
+      center: { lat, lon },
+      latlngs: coords.map((c) => [c[1], c[0]]), // Leaflet wants [lat, lon]
+    };
+  } catch {
+    return null;
+  }
+}
+
 /* ---------- places (Overpass) ---------- */
 
-// Pick a search radius (meters) based on how far apart the two people are.
-function radiusFor(distApartKm) {
-  if (distApartKm < 6) return 1500;
-  if (distApartKm < 25) return 3000;
-  return 5000;
-}
+// Search a generous ~10 mile radius around the middle so there are plenty of
+// options to choose from.
+const SEARCH_RADIUS_M = 16093; // 10 miles
 
 const CATEGORY = {
   restaurant: "eat", fast_food: "eat", bar: "eat", pub: "eat",
@@ -132,7 +188,7 @@ async function fetchPlaces(mid, radius) {
   node["leisure"~"^(park|garden|bowling_alley)$"](around:${radius},${mid.lat},${mid.lon});
   node["tourism"~"^(museum|gallery|viewpoint|artwork|zoo|aquarium|attraction)$"](around:${radius},${mid.lat},${mid.lon});
 );
-out body 120;`;
+out body 800;`;
 
   let data;
   try {
@@ -227,8 +283,9 @@ function initMap() {
   markerLayer = L.layerGroup().addTo(map);
 }
 
-// Draw the "you / them / middle" pins and connecting line around a center.
-function drawBase(center) {
+// Draw the "you / them / middle" pins around a center. If routeLatLngs is
+// given, draw the real driving route; otherwise a straight dashed line.
+function drawBase(center, routeLatLngs) {
   markerLayer.clearLayers();
   const a = state.a, b = state.b;
 
@@ -236,17 +293,27 @@ function drawBase(center) {
     .addTo(markerLayer).bindPopup("You 💗");
   L.marker([b.lat, b.lon], { icon: pinIcon("#3a6ff0", "📍") })
     .addTo(markerLayer).bindPopup("Them 💙");
-  L.marker([center.lat, center.lon], { icon: pinIcon("#9b5de5", "✨") })
+  L.marker([center.lat, center.lon], { icon: pinIcon("#9b5de5", "💕") })
     .addTo(markerLayer)
-    .bindPopup(center.name ? `Meet near ${center.name} ✨` : "Your middle ✨");
+    .bindPopup(
+      center.name ? `Meet near ${center.name} 💕`
+      : routeLatLngs ? "Your driving middle 🚗"
+      : "Your middle 💕"
+    );
 
-  L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-    color: "#9b5de5", weight: 3, dashArray: "6 8", opacity: 0.7,
-  }).addTo(markerLayer);
+  let bounds;
+  if (routeLatLngs) {
+    const line = L.polyline(routeLatLngs, { color: "#9b5de5", weight: 4, opacity: 0.75 })
+      .addTo(markerLayer);
+    bounds = line.getBounds();
+  } else {
+    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+      color: "#9b5de5", weight: 3, dashArray: "6 8", opacity: 0.7,
+    }).addTo(markerLayer);
+    bounds = L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon], [center.lat, center.lon]]);
+  }
 
-  map.fitBounds(
-    L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon], [center.lat, center.lon]]).pad(0.3)
-  );
+  map.fitBounds(bounds.pad(0.2));
   setTimeout(() => map.invalidateSize(), 150);
 }
 
@@ -261,7 +328,7 @@ function addPlaceMarkers(places) {
       fillOpacity: 0.95,
     })
       .addTo(markerLayer)
-      .bindPopup(`${meta.emoji} <b>${p.name}</b><br>${p.distKm.toFixed(1)} km from middle`);
+      .bindPopup(`${meta.emoji} <b>${p.name}</b><br>${mi(p.distKm)} mi from middle`);
   });
 }
 
@@ -279,7 +346,7 @@ function showWaterNote(options, activeName, heading) {
   options.forEach((o) => {
     const btn = document.createElement("button");
     btn.className = "land-btn" + (o.name === activeName ? " land-btn--active" : "");
-    btn.textContent = `${o.name} · ${o.distKm.toFixed(1)} km`;
+    btn.textContent = `${o.name} · ${mi(o.distKm)} mi`;
     btn.addEventListener("click", () => {
       [...wrap.children].forEach((c) => c.classList.toggle("land-btn--active", c === btn));
       setStatus(`Searching near ${o.name}… 💫`);
@@ -304,9 +371,9 @@ function render() {
     return;
   }
 
-  list.slice(0, 30).forEach((p) => {
+  list.slice(0, 48).forEach((p) => {
     const meta = LABELS[p.bucket];
-    const details = [p.cuisine || p.kind, `${p.distKm.toFixed(1)} km from the middle`]
+    const details = [p.cuisine || p.kind, `${mi(p.distKm)} mi from the middle`]
       .filter(Boolean)
       .join(" · ");
     const mapHref = `https://www.openstreetmap.org/?mlat=${p.lat}&mlon=${p.lon}#map=18/${p.lat}/${p.lon}`;
@@ -381,10 +448,10 @@ buildTitle();
 /* ---------- main flow ---------- */
 
 // Fetch + render everything around a chosen center.
-async function loadAndRender(center) {
-  drawBase(center);
+async function loadAndRender(center, routeLatLngs) {
+  drawBase(center, routeLatLngs);
   allPlaces = await fetchPlaces(center, state.radius);
-  addPlaceMarkers(allPlaces.slice(0, 60));
+  addPlaceMarkers(allPlaces.slice(0, 90));
   activeFilter = "all";
   [...filtersEl.children].forEach((c, i) => c.classList.toggle("chip--active", i === 0));
   render();
@@ -410,15 +477,36 @@ form.addEventListener("submit", async (e) => {
 
   try {
     const [a, b] = await Promise.all([geocode(q1), geocode(q2)]);
-    const trueMid = geoMidpoint(a, b);
     const apart = distanceKm(a, b);
-    state = { a, b, radius: radiusFor(apart) };
-
-    setStatus(`You're ${apart.toFixed(1)} km apart. Searching the sweet spot in between… 💫`);
+    state = { a, b, radius: SEARCH_RADIUS_M };
     resultsWrap.hidden = false;
     initMap();
 
-    const landRadius = Math.max(state.radius * 4, 15000);
+    const landRadius = Math.max(state.radius * 2, 15000);
+
+    // Driving mode: meet halfway along the actual road route.
+    if (midMode === "drive") {
+      setStatus("Mapping the drive between you two… 🚗");
+      const drive = await drivingMidpoint(a, b);
+      if (drive) {
+        waterNoteEl.hidden = true;
+        await loadAndRender(drive.center, drive.latlngs);
+        // Nothing right at the driving middle? Offer the nearest towns.
+        if (!allPlaces.length) {
+          const options = await nearestLandOptions(drive.center, landRadius);
+          if (options.length) {
+            showWaterNote(options, options[0].name,
+              "🚗 nothing right at your driving middle! here are the closest towns — pick one:");
+            await loadAndRender(options[0]);
+          }
+        }
+        return;
+      }
+      setStatus("No drivable route between you two — using the straight-line middle instead 🛣️");
+    }
+
+    // Straight-line mode (also the driving fallback): geographic midpoint.
+    const trueMid = geoMidpoint(a, b);
 
     // 1) Midpoint sits inside a mapped water body (bay / lake / wide river).
     if (await isWaterPoint(trueMid)) {
@@ -434,6 +522,7 @@ form.addEventListener("submit", async (e) => {
 
     // 2) Otherwise search right at the midpoint.
     waterNoteEl.hidden = true;
+    setStatus(`You're ${mi(apart)} mi apart. Searching the sweet spot in between… 💫`);
     await loadAndRender(trueMid);
 
     // 3) Fallback: nothing at the midpoint (open ocean or an empty area) —

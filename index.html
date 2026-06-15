@@ -30,7 +30,12 @@
         <input id="loc2" type="text" placeholder="e.g. Hoboken, NJ or 07030" autocomplete="off" required />
       </div>
 
-      <button type="submit" class="go-btn" id="go-btn">Find our middle ✨</button>
+      <div class="mode-toggle" id="mode-toggle" role="group" aria-label="how to measure the middle">
+        <button type="button" class="mode-btn mode-btn--active" data-mode="drive">🚗 driving distance</button>
+        <button type="button" class="mode-btn" data-mode="geo">📏 straight-line</button>
+      </div>
+
+      <button type="submit" class="go-btn" id="go-btn">Find our middle 💕</button>
     </form>
 
     <p id="status" class="status" role="status" aria-live="polite"></p>
